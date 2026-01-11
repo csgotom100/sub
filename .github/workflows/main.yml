@@ -1,14 +1,14 @@
 name: Node Extract Bot
 on:
-  workflow_dispatch:
+  workflow_dispatch: 
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */6 * * *' 
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 关键：允许 Action 修改你的仓库文件
+      contents: write # 关键：赋予写入权限
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -28,8 +28,6 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          # 告诉 Git 追踪这两个新生成的文件
-          git add clash_nodes.yaml clash_to_v2ray.txt
-          # 只有当文件确实有变动时才提交，避免报错
+          # 添加所有隔离输出的文件
+          git add vless_raw.txt hy2_raw.txt clash_raw.txt subscribe.txt
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update nodes $(date)" && git push)
-
