@@ -108,3 +108,21 @@ def main():
 
 if __name__ == "__main__":
     main()
+#  main.py 结尾
+    output_path1 = 'clash_nodes.yaml'
+    output_path2 = 'clash_to_v2ray.txt'
+
+    # 输出一：照搬节点 YAML
+    with open(output_path1, 'w', encoding='utf-8') as f:
+        yaml.dump({"proxies": all_proxies}, f, allow_unicode=True, sort_keys=False)
+
+    # 输出二：转换后的链接 TXT
+    with open(output_path2, 'w', encoding='utf-8') as f:
+        for i, link in enumerate(v2ray_links, 1):
+            f.write(f"{link}#Clash-{i:03d}\n")
+
+    # 调试日志：在 Actions Console 里确认文件大小
+    if os.path.exists(output_path1):
+        print(f"文件已生成: {output_path1}, 大小: {os.path.getsize(output_path1)} bytes")
+    if os.path.exists(output_path2):
+        print(f"文件已生成: {output_path2}, 大小: {os.path.getsize(output_path2)} bytes")
