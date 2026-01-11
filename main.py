@@ -3,92 +3,86 @@ import json
 import base64
 import os
 import urllib.parse
+import re
 
-def parse_xray(data):
-    """解析 Xray JSON 格式"""
+def fix_address(address):
+    """处理 IPv6 地址格式"""
+    if ":" in address and not address.startswith("["):
+        return f"[{address}]"
+    return address
+
+def parse_nodes(content):
     links = []
-    outbounds = data.get("outbounds", [])
-    for out in outbounds:
-        protocol = out.get("protocol")
-        if protocol not in ["vless", "vmess", "shadowsocks", "trojan"]:
-            continue
+    try:
+        data = json.loads(content)
+        outbounds = data.get("outbounds", [])
         
-        settings = out.get("settings", {})
-        vnext = settings.get("vnext", [])
-        if not vnext: continue
-        
-        # 提取基础信息
-        srv = vnext[0]
-        user = srv.get("users", [{}])[0]
-        address = srv.get("address")
-        port = srv.get("port")
-        uuid = user.get("id")
-        tag = out.get("tag", "Xray-Node")
-        
-        stream = out.get("streamSettings", {})
-        net = stream.get("network", "tcp")
-        security = stream.get("security", "none")
-        
-        # 构造参数
-        params = {
-            "type": net,
-            "security": security,
-            "sni": "",
-            "fp": "",
-            "pbk": "",
-            "sid": "",
-            "path": ""
-        }
-        
-        # Reality 处理
-        if security == "reality":
-            r_settings = stream.get("realitySettings", {})
-            params["sni"] = r_settings.get("serverName")
-            params["fp"] = r_settings.get("fingerprint")
-            params["pbk"] = r_settings.get("publicKey")
-            params["sid"] = r_settings.get("shortId")
-        
-        # xhttp / ws 路径处理
-        if net == "xhttp":
-            params["path"] = stream.get("xhttpSettings", {}).get("path")
-        elif net == "ws":
-            params["path"] = stream.get("wsSettings", {}).get("path")
+        for out in outbounds:
+            # 兼容 sing-box (type) 和 xray (protocol)
+            protocol = out.get("protocol") or out.get("type")
+            if protocol != "vless": continue 
 
-        # 构造 URL (以 VLESS 为例)
-        if protocol == "vless":
-            query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
-            links.append(f"vless://{uuid}@{address}:{port}?{query}#{urllib.parse.quote(tag)}")
+            # --- 提取基础信息 ---
+            tag = out.get("tag", "Node")
+            # 处理 xray 的 vnext 嵌套格式
+            if "settings" in out and "vnext" in out["settings"]:
+                srv = out["settings"]["vnext"][0]
+                addr = srv.get("address")
+                port = srv.get("port")
+                uuid = srv.get("users", [{}])[0].get("id")
+            else:
+                # 处理 sing-box 的平铺格式
+                addr = out.get("server")
+                port = out.get("server_port")
+                uuid = out.get("uuid")
+
+            if not all([addr, port, uuid]): continue
+
+            # --- 提取传输层/安全配置 ---
+            stream = out.get("streamSettings", {}) # xray
+            tls = out.get("tls", {})               # sing-box
             
-    return links
+            net = stream.get("network") or "tcp"
+            security = stream.get("security") or ("reality" if tls.get("reality", {}).get("enabled") else "none")
+            
+            params = {
+                "type": net,
+                "security": security,
+                "encryption": "none"
+            }
 
-def parse_sing_box(data):
-    """解析 sing-box JSON 格式 (你之前已调通的部分)"""
-    links = []
-    outbounds = data.get("outbounds", [])
-    for out in outbounds:
-        t = out.get("type")
-        if t not in ["vless", "vmess", "shadowsocks"]: continue
-        
-        address = out.get("server")
-        port = out.get("server_port")
-        uuid = out.get("uuid")
-        tag = out.get("tag", "SB-Node")
-        
-        tls = out.get("tls", {})
-        reality = tls.get("reality", {})
-        
-        params = {
-            "encryption": "none",
-            "security": "reality" if reality.get("enabled") else ("tls" if tls.get("enabled") else "none"),
-            "sni": tls.get("server_name"),
-            "fp": tls.get("utls", {}).get("fingerprint"),
-            "pbk": reality.get("public_key"),
-            "sid": reality.get("short_id"),
-            "type": "tcp"
-        }
-        
-        query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
-        links.append(f"vless://{uuid}@{address}:{port}?{query}#{urllib.parse.quote(tag)}")
+            # Reality 参数提取
+            if security == "reality":
+                # 尝试从 xray 结构拿
+                r_settings = stream.get("realitySettings")
+                if r_settings:
+                    params.update({
+                        "sni": r_settings.get("serverName"),
+                        "fp": r_settings.get("fingerprint"),
+                        "pbk": r_settings.get("publicKey"),
+                        "sid": r_settings.get("shortId")
+                    })
+                else:
+                    # 尝试从 sing-box 结构拿
+                    r_sb = tls.get("reality", {})
+                    params.update({
+                        "sni": tls.get("server_name"),
+                        "fp": tls.get("utls", {}).get("fingerprint"),
+                        "pbk": r_sb.get("public_key"),
+                        "sid": r_sb.get("short_id")
+                    })
+
+            # 路径提取 (xhttp/ws)
+            path = stream.get("xhttpSettings", {}).get("path") or stream.get("wsSettings", {}).get("path")
+            if path: params["path"] = path
+
+            # --- 构造最终链接 ---
+            addr = fix_address(addr)
+            query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
+            links.append(f"vless://{uuid}@{addr}:{port}?{query}#{urllib.parse.quote(tag)}")
+            
+    except Exception as e:
+        print(f"解析错误: {e}")
     return links
 
 def main():
@@ -98,25 +92,20 @@ def main():
 
     all_links = []
     for url in urls:
-        print(f"Fetching: {url[:60]}...")
+        print(f"Fetching: {url[:50]}...")
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as res:
-                content = json.loads(res.read().decode('utf-8'))
-                # 根据 JSON 特征判断解析方式
-                if "outbounds" in content:
-                    # 简单判断：xray 通常有 log 或 routing 字段
-                    if "log" in content or "routing" in content:
-                        nodes = parse_xray(content)
-                    else:
-                        nodes = parse_sing_box(content)
-                    all_links.extend(nodes)
-                    print(f"  Done: {len(nodes)} nodes")
-        except Exception as e:
-            print(f"  Skip: {e}")
+            with urllib.request.urlopen(req, timeout=15) as res:
+                nodes = parse_nodes(res.read().decode('utf-8'))
+                all_links.extend(nodes)
+        except: continue
 
+    # 利用 set 去重，保持顺序用 dict
+    unique_links = list(dict.fromkeys(all_links))
+    
     with open('subscribe.txt', 'w', encoding='utf-8') as f:
-        f.write("\n".join(all_links))
+        f.write("\n".join(unique_links))
+    print(f"Done. Extracted {len(unique_links)} unique nodes.")
 
 if __name__ == "__main__":
     main()
