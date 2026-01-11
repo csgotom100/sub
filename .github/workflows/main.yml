@@ -33,19 +33,3 @@ jobs:
           # 只有当文件确实有变动时才提交，避免报错
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update nodes $(date)" && git push)
 
-# 汇总所有池子的链接
-    all_links = pools["vless"] + pools["hy2"] + pools["clash"]
-    
-    # 物理隔离存储一份明文版（方便调试）
-    with open('subscribe_raw.txt', 'w', encoding='utf-8') as f:
-        for i, link in enumerate(all_links, 1):
-            f.write(f"{link}#Node-{i:03d}\n")
-
-    # 生成 Base64 版（给 v2rayN 订阅用）
-    combined_str = "\n".join([f"{l}#Node-{i+1:03d}" for i, l in enumerate(all_links)])
-    b64_str = base64.b64encode(combined_str.encode('utf-8')).decode('utf-8')
-    
-    with open('subscribe.txt', 'w', encoding='utf-8') as f:
-        f.write(b64_str)
-
-    print(f"订阅生成完毕！已踢除 hy1，保留 {len(all_links)} 个高质量节点。")
