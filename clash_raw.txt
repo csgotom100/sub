@@ -1,0 +1,5 @@
+vless://add14a5b-f648-4423-8a1f-8b8f54c0daef@195.154.200.13:17401?encryption=none&security=reality&type=tcp&sni=itunes.apple.com&fp=chrome&pbk=IXcXrT_Y0ATTZlGOhPnSmKo-cuGr4yMKV9Rz4-nA3yU&sid=8ef4455ba637425b
+vless://add14a5b-f648-4423-8a1f-8b8f54c0daef@[2001:bc8:32d7:181::2]:17401?encryption=none&security=reality&type=tcp&sni=itunes.apple.com&fp=chrome&pbk=IXcXrT_Y0ATTZlGOhPnSmKo-cuGr4yMKV9Rz4-nA3yU&sid=8ef4455ba637425b
+vless://add14a5b-f648-4423-8a1f-8b8f54c0daef@[2001:bc8:32d7:181::3]:17401?encryption=none&security=reality&type=tcp&sni=itunes.apple.com&fp=chrome&pbk=IXcXrT_Y0ATTZlGOhPnSmKo-cuGr4yMKV9Rz4-nA3yU&sid=8ef4455ba637425b
+tuic://66d37a65-7f6f-4e7c-a0f6-163bd917756a:dongtaiwang.com@89.144.35.231:33457?sni=apple.com&insecure=1&alpn=h3
+tuic://66d37a65-7f6f-4e7c-a0f6-163bd917756a:dongtaiwang.com@[2a14:7583:299d::a]:33457?sni=apple.com&insecure=1&alpn=h3
