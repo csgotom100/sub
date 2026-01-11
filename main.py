@@ -4,89 +4,72 @@ import base64
 import os
 import urllib.parse
 
-def parse_nodes(json_text):
+def parse_sing_box(json_text):
     links = []
     try:
         data = json.loads(json_text)
         outbounds = data.get("outbounds", [])
         
         for out in outbounds:
-            t = out.get("type") or out.get("protocol")
-            # 过滤掉非代理协议（如 direct, block, dns 等）
-            if t not in ["vmess", "vless", "shadowsocks", "trojan", "ss"]:
-                continue
-                
-            tag = out.get("tag", "Node")
-            server = out.get("server") or out.get("address")
-            port = out.get("server_port") or out.get("port")
+            t = out.get("type")
+            if t != "vless": continue # 先专注调通 vless
             
-            if not server or not port:
-                continue
-
-            # --- 1. Shadowsocks ---
-            if t in ["shadowsocks", "ss"]:
-                method = out.get("method")
-                password = out.get("password")
-                if method and password:
-                    # 格式: ss://base64(method:password)@server:port#tag
-                    auth = base64.b64encode(f"{method}:{password}".encode()).decode()
-                    links.append(f"ss://{auth}@{server}:{port}#{urllib.parse.quote(tag)}")
-
-            # --- 2. VMess ---
-            elif t == "vmess":
-                uuid = out.get("uuid") or (out.get("users", [{}])[0].get("id"))
-                if uuid:
-                    # 简化版 vmess 结构
-                    v2_json = {
-                        "v": "2", "ps": tag, "add": server, "port": str(port),
-                        "id": uuid, "aid": "0", "net": "tcp", "type": "none", "tls": ""
-                    }
-                    # 自动识别 TLS/WS (针对 Alvin9999 的配置习惯)
-                    if out.get("tls"): v2_json["tls"] = "tls"
-                    
-                    v2_enc = base64.b64encode(json.dumps(v2_json).encode()).decode()
-                    links.append(f"vmess://{v2_enc}")
-
-            # --- 3. VLESS ---
-            elif t == "vless":
-                uuid = out.get("uuid") or (out.get("users", [{}])[0].get("id"))
-                if uuid:
-                    links.append(f"vless://{uuid}@{server}:{port}?type=tcp&security=none#{urllib.parse.quote(tag)}")
-
-            # --- 4. Trojan ---
-            elif t == "trojan":
-                password = out.get("password") or (out.get("users", [{}])[0].get("password"))
-                if password:
-                    links.append(f"trojan://{password}@{server}:{port}#{urllib.parse.quote(tag)}")
-
+            server = out.get("server")
+            port = out.get("server_port")
+            uuid = out.get("uuid")
+            tag = out.get("tag", "Node")
+            
+            # 解析 TLS / Reality
+            tls_conf = out.get("tls", {})
+            reality_conf = tls_conf.get("reality", {})
+            
+            # 基础参数
+            params = {
+                "encryption": "none",
+                "security": "reality" if reality_conf.get("enabled") else ("tls" if tls_conf.get("enabled") else "none"),
+                "sni": tls_conf.get("server_name", ""),
+                "fp": tls_conf.get("utls", {}).get("fingerprint", "chrome"),
+                "pbk": reality_conf.get("public_key", ""),
+                "sid": reality_conf.get("short_id", ""),
+                "type": "tcp" # 默认 tcp，若有 transport 则需扩充
+            }
+            
+            # 构造 vless 链接
+            query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
+            vless_link = f"vless://{uuid}@{server}:{port}?{query}#{urllib.parse.quote(tag)}"
+            links.append(vless_link)
+            
     except Exception as e:
-        print(f"  解析跳转: {e}")
+        print(f"解析出错: {e}")
     return links
 
 def main():
+    # 这里为了测试，我们直接读取 sources.txt
+    if not os.path.exists('sources.txt'): return
+    
     with open('sources.txt', 'r') as f:
-        urls = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        urls = [line.strip() for line in f if line.startswith('http')]
 
     all_links = []
     headers = {'User-Agent': 'Mozilla/5.0'}
 
     for url in urls:
-        print(f"正在处理: {url[:50]}...")
+        # 只处理包含 singbox 字样的链接进行调试
+        if "singbox" not in url: continue
+        
+        print(f"Processing: {url}")
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as res:
-                text = res.read().decode('utf-8')
-                nodes = parse_nodes(text)
-                print(f"  成功提取 {len(nodes)} 个节点")
+            with urllib.request.urlopen(req, timeout=10) as res:
+                content = res.read().decode('utf-8')
+                nodes = parse_sing_box(content)
+                print(f"  Extracted {len(nodes)} nodes")
                 all_links.extend(nodes)
         except Exception as e:
-            print(f"  请求失败: {e}")
+            print(f"  Error: {e}")
 
-    # 去重并保存
-    unique_links = list(dict.fromkeys(all_links))
     with open('subscribe.txt', 'w', encoding='utf-8') as f:
-        f.write("\n".join(unique_links))
-    print(f"\n任务完成！共生成 {len(unique_links)} 个有效节点链接。")
+        f.write("\n".join(all_links))
 
 if __name__ == "__main__":
     main()
