@@ -2,7 +2,6 @@ import urllib.request
 import json
 import os
 import urllib.parse
-import base64
 import yaml
 
 def fix_address(address):
@@ -10,66 +9,118 @@ def fix_address(address):
         return f"[{address}]"
     return address
 
+class Extractor:
+    @staticmethod
+    def vless_json(out, addr, port):
+        if "settings" in out and "vnext" in out["settings"]:
+            user = out["settings"]["vnext"][0]["users"][0]
+            uuid, flow = user.get("id", ""), user.get("flow", "")
+        else:
+            uuid, flow = out.get("uuid", ""), out.get("flow", "")
+        if not uuid: return None
+        
+        stream = out.get("streamSettings", {})
+        tls = out.get("tls", {})
+        net = stream.get("network") or out.get("transport", {}).get("type") or "tcp"
+        security = stream.get("security") or ("reality" if tls.get("reality", {}).get("enabled") else "none")
+        
+        params = {"encryption": "none", "security": security, "type": net}
+        if flow: params["flow"] = flow
+        r_src = {**stream.get("realitySettings", {}), **tls.get("reality", {})}
+        if security == "reality":
+            params["sni"] = r_src.get("serverName") or r_src.get("server_name")
+            params["pbk"] = r_src.get("publicKey") or r_src.get("public_key")
+            params["sid"] = r_src.get("shortId") or r_src.get("short_id")
+        
+        query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
+        return f"vless://{uuid}@{fix_address(addr)}:{port}?{query}"
+
+    @staticmethod
+    def hy2_json(data):
+        server_raw = data.get("server", "")
+        if ":" not in server_raw: return None
+        addr_port = server_raw.split(',')[0]
+        addr, port = addr_port.rsplit(':', 1)
+        params = {"insecure": 1 if data.get("tls", {}).get("insecure") else 0}
+        if data.get("tls", {}).get("sni"): params["sni"] = data["tls"]["sni"]
+        query = urllib.parse.urlencode(params)
+        return f"hysteria2://{data.get('auth', '')}@{fix_address(addr)}:{port}?{query}"
+
+    @staticmethod
+    def from_clash(p):
+        ptype = str(p.get('type', '')).lower()
+        addr, port = p.get('server'), p.get('port')
+        if not addr or not port: return None
+
+        # 彻底剔除 hysteria 1代 (hy1)
+        if ptype == 'hysteria': return None 
+
+        if ptype == 'vless':
+            params = {
+                "encryption": "none",
+                "security": "reality" if p.get('reality-opts') or p.get('tls') else "none",
+                "type": p.get('network', 'tcp'),
+                "sni": p.get('servername') or p.get('sni'),
+                "fp": p.get('client-fingerprint', 'chrome'),
+                "pbk": p.get('reality-opts', {}).get('public-key') if p.get('reality-opts') else "",
+                "sid": p.get('reality-opts', {}).get('short-id') if p.get('reality-opts') else ""
+            }
+            query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
+            return f"vless://{p.get('uuid')}@{fix_address(addr)}:{port}?{query}"
+        
+        if ptype == 'tuic':
+            params = {"sni": p.get('sni'), "insecure": 1, "alpn": "h3"}
+            query = urllib.parse.urlencode(params)
+            return f"tuic://{p.get('uuid')}:{p.get('password')}@{fix_address(addr)}:{port}?{query}"
+        
+        return None
+
 def main():
-    # 物理隔离存储池
     pools = {"vless": [], "hy2": [], "clash": []}
     seen = set()
-    logs = []
-
-    if not os.path.exists('sources.txt'):
-        with open('error_log.txt', 'w') as f: f.write("sources.txt 不存在")
-        return
-
+    
+    if not os.path.exists('sources.txt'): return
     with open('sources.txt', 'r', encoding='utf-8') as f:
         urls = [line.strip() for line in f if line.startswith('http')]
-
-    logs.append(f"找到 {len(urls)} 个待处理 URL")
 
     for url in urls:
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=15) as res:
-                content = res.read().decode('utf-8')
-                
-                # --- Clash YAML 处理 ---
+                raw_data = res.read().decode('utf-8')
                 if 'clash' in url.lower() or '.yaml' in url.lower():
-                    data = yaml.safe_load(content)
-                    proxies = data.get('proxies', [])
-                    count = 0
-                    for p in proxies:
-                        ptype = str(p.get('type', '')).lower()
-                        # 物理隔离：只留 VLESS, TUIC
-                        if ptype in ['vless', 'tuic']:
-                            # ... (此处省略转换逻辑，确保变量 link 已生成) ...
-                            # 假设逻辑已执行并生成 link
-                            if link and link not in seen:
-                                seen.add(link)
-                                pools["clash"].append(link)
-                                count += 1
-                    logs.append(f"YAML {url}: 提取了 {count} 个有效节点 (已剔除 hy1)")
-
-                # --- Sing-box JSON 处理 ---
+                    data = yaml.safe_load(raw_data)
+                    for p in data.get('proxies', []):
+                        link = Extractor.from_clash(p)
+                        if link and link not in seen:
+                            seen.add(link); pools["clash"].append(link)
                 else:
-                    data = json.loads(content)
-                    # 之前的 JSON VLESS 和 HY2 逻辑...
-                    logs.append(f"JSON {url}: 处理成功")
+                    data = json.loads(raw_data)
+                    if "outbounds" in data:
+                        for out in data["outbounds"]:
+                            if out.get("protocol") == "vless":
+                                srv = out.get("server") or out.get("settings", {}).get("vnext", [{}])[0].get("address")
+                                prt = out.get("server_port") or out.get("settings", {}).get("vnext", [{}])[0].get("port")
+                                link = Extractor.vless_json(out, srv, prt)
+                                if link and link not in seen: seen.add(link); pools["vless"].append(link)
+                    elif "auth" in data and "server" in data:
+                        link = Extractor.hy2_json(data)
+                        if link and link not in seen: seen.add(link); pools["hy2"].append(link)
         except Exception as e:
-            logs.append(f"URL 失败 {url}: {str(e)}")
+            print(f"Error: {url} -> {e}")
 
-    # --- 物理强制输出 ---
-    # 1. 即使为空也生成文件，确保 git add 不报错
+    # 1. 物理隔离输出（明文）
     for k, v in pools.items():
         with open(f'{k}_raw.txt', 'w', encoding='utf-8') as f:
-            f.write("\n".join(v) if v else "no_data")
+            f.write("\n".join(v))
 
-    # 2. 汇总输出
+    # 2. 汇总输出明文 (用于节点转换服务)
     all_links = pools["vless"] + pools["hy2"] + pools["clash"]
-    with open('subscribe_raw.txt', 'w', encoding='utf-8') as f:
-        f.write("\n".join(all_links) if all_links else "empty")
-
-    # 3. 日志输出（用于调试）
-    with open('run_log.txt', 'w', encoding='utf-8') as f:
-        f.write("\n".join(logs))
+    # 增加标签区分
+    final_links = [f"{link}#Node-{i+1:03d}" for i, link in enumerate(all_links)]
+    
+    with open('subscribe.txt', 'w', encoding='utf-8') as f:
+        f.write("\n".join(final_links))
 
 if __name__ == "__main__":
     main()
