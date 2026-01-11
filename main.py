@@ -2,9 +2,9 @@ import urllib.request
 import json
 import os
 import urllib.parse
-import base64
 
 def fix_address(address):
+    """处理 IPv6 地址"""
     if ":" in address and not address.startswith("["):
         return f"[{address}]"
     return address
@@ -12,11 +12,13 @@ def fix_address(address):
 class NodeExtractor:
     @staticmethod
     def vless(out, addr, port):
+        """严格按照之前的成功逻辑提取 VLESS"""
         if "settings" in out and "vnext" in out["settings"]:
             user = out["settings"]["vnext"][0]["users"][0]
             uuid, flow = user.get("id", ""), user.get("flow", "")
         else:
             uuid, flow = out.get("uuid", ""), out.get("flow", "")
+        
         if not uuid: return None
         
         stream = out.get("streamSettings", {})
@@ -27,8 +29,11 @@ class NodeExtractor:
         params = {"encryption": "none", "security": security, "type": net}
         if flow: params["flow"] = flow
 
+        # Reality 字段映射
         r_src = {}
-        r_src.update(stream.get("realitySettings", {})); r_src.update(tls.get("reality", {}))
+        r_src.update(stream.get("realitySettings", {}))
+        r_src.update(tls.get("reality", {}))
+        
         if security == "reality":
             params["sni"] = r_src.get("serverName") or r_src.get("server_name") or tls.get("server_name")
             params["fp"] = r_src.get("fingerprint") or tls.get("utls", {}).get("fingerprint")
@@ -45,88 +50,81 @@ class NodeExtractor:
         return f"vless://{uuid}@{fix_address(addr)}:{port}?{query}"
 
     @staticmethod
-    def hy2(out, addr, port):
-        auth = out.get("auth") or out.get("settings", {}).get("auth")
-        if not auth: return None
-        tls = out.get("tls", {})
-        sni = tls.get("server_name") or tls.get("serverName")
-        insecure = 1 if tls.get("insecure") or tls.get("allow_insecure") else 0
-        query = urllib.parse.urlencode({"sni": sni, "insecure": insecure} if sni else {"insecure": insecure})
+    def hy2(data):
+        """专门提取 Alvin 的单节点 HY2 格式"""
+        server_raw = data.get("server", "")
+        if not server_raw or ":" not in server_raw: return None
+        
+        # 处理 Alvin 特有的端口范围格式 "IP:Port1,Port2-Port3"
+        # 提取第一个主端口用于订阅链接
+        addr_port = server_raw.split(',')[0]
+        try:
+            addr, port = addr_port.rsplit(':', 1)
+        except ValueError: return None
+        
+        auth = data.get("auth", "")
+        tls = data.get("tls", {})
+        sni = tls.get("sni") or tls.get("serverName")
+        insecure = 1 if tls.get("insecure") else 0
+        
+        params = {"insecure": insecure}
+        if sni: params["sni"] = sni
+        
+        query = urllib.parse.urlencode(params)
         return f"hysteria2://{auth}@{fix_address(addr)}:{port}?{query}"
-
-    @staticmethod
-    def ss(out, addr, port):
-        method = out.get("method") or out.get("settings", {}).get("method")
-        password = out.get("password") or out.get("settings", {}).get("password")
-        if not method or not password: return None
-        auth_b64 = base64.b64encode(f"{method}:{password}".encode()).decode().strip("=")
-        return f"ss://{auth_b64}@{fix_address(addr)}:{port}"
-
-def process_content(content):
-    # 分流容器
-    pools = {"vless": [], "hysteria2": [], "shadowsocks": []}
-    try:
-        data = json.loads(content)
-        for out in data.get("outbounds", []):
-            raw_proto = (out.get("protocol") or out.get("type", "")).lower()
-            proto = "hysteria2" if raw_proto in ["hysteria2", "hy2"] else ("shadowsocks" if raw_proto in ["shadowsocks", "ss"] else raw_proto)
-            
-            if proto not in pools: continue
-
-            # 提取通用地址
-            addr = out.get("server") or out.get("settings", {}).get("vnext", [{}])[0].get("address")
-            port = out.get("server_port") or out.get("settings", {}).get("vnext", [{}])[0].get("port")
-            if not addr or not port: continue
-
-            # 调用对应提取器
-            extractor = getattr(NodeExtractor, proto, None)
-            if extractor:
-                link = extractor(out, addr, port)
-                if link: pools[proto].append(link)
-    except: pass
-    return pools
 
 def main():
     if not os.path.exists('sources.txt'): return
     with open('sources.txt', 'r', encoding='utf-8') as f:
-        urls = [line.strip() for line in f if line.startswith('http')]
+        # 过滤掉 clash 链接，只处理 json 链接
+        urls = [line.strip() for line in f if line.startswith('http') and '.yaml' not in line.lower() and 'clash' not in line.lower()]
 
-    # 全局存储
-    global_pools = {"vless": [], "hysteria2": [], "shadowsocks": []}
+    vless_pool = []
+    hy2_pool = []
+    seen = set()
 
     for url in urls:
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=10) as res:
                 content = res.read().decode('utf-8')
-                current_pools = process_content(content)
-                for p in global_pools:
-                    global_pools[p].extend(current_pools[p])
+                data = json.loads(content)
+                
+                # 情况 1: 多节点 JSON (VLESS)
+                if "outbounds" in data:
+                    for out in data["outbounds"]:
+                        if (out.get("protocol") or out.get("type", "")).lower() == "vless":
+                            srv = out.get("server") or out.get("settings", {}).get("vnext", [{}])[0].get("address")
+                            prt = out.get("server_port") or out.get("settings", {}).get("vnext", [{}])[0].get("port")
+                            link = NodeExtractor.vless(out, srv, prt)
+                            if link and link not in seen:
+                                seen.add(link); vless_pool.append(link)
+                
+                # 情况 2: 单节点 JSON (HY2)
+                elif "auth" in data and "server" in data:
+                    link = NodeExtractor.hy2(data)
+                    if link and link not in seen:
+                        seen.add(link); hy2_pool.append(link)
         except: continue
 
-    # 1. 物理隔离写入各自分组文件（可选）
-    for p, links in global_pools.items():
-        with open(f'{p}_raw.txt', 'w', encoding='utf-8') as f:
-            f.write("\n".join(links))
+    # 物理隔离写入
+    with open('vless_raw.txt', 'w', encoding='utf-8') as f:
+        f.write("\n".join(vless_pool))
+    with open('hy2_raw.txt', 'w', encoding='utf-8') as f:
+        f.write("\n".join(hy2_pool))
 
-    # 2. 全局物理去重汇总
-    seen_identity = set()
-    final_links = []
+    # 统一汇总生成 subscribe.txt
+    final_list = []
     idx = 1
-    
-    # 按特定顺序汇总
-    for p in ["vless", "hysteria2", "shadowsocks"]:
-        for link in global_pools[p]:
-            # 提取物理特征：协议 + 认证信息 + 地址端口
-            identity = f"{p}:{link.split('#')[0]}" 
-            if identity not in seen_identity:
-                seen_identity.add(identity)
-                tag = urllib.parse.quote(f"Node-{idx:03d}")
-                final_links.append(f"{link}#{tag}")
-                idx += 1
+    # 按照先 VLESS 后 HY2 的顺序排列
+    for pool in [vless_pool, hy2_pool]:
+        for link in pool:
+            tag = urllib.parse.quote(f"Node-{idx:03d}")
+            final_list.append(f"{link}#{tag}")
+            idx += 1
 
     with open('subscribe.txt', 'w', encoding='utf-8') as f:
-        f.write("\n".join(final_links))
+        f.write("\n".join(final_list))
 
 if __name__ == "__main__":
     main()
