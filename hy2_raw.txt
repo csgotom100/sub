@@ -1,0 +1,3 @@
+hysteria2://dongtaiwang.com@157.254.223.43:27921?insecure=1&sni=apple.com
+hysteria2://dongtaiwang.com@62.210.124.146:22000?insecure=1&sni=www.microsoft.com
+hysteria2://dongtaiwang.com@[2a14:7584:d04a::a]:50022?insecure=1&sni=apple.com
