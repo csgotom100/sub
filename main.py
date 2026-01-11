@@ -3,10 +3,8 @@ import json
 import base64
 import os
 import urllib.parse
-import re
 
 def fix_address(address):
-    """处理 IPv6 地址格式"""
     if ":" in address and not address.startswith("["):
         return f"[{address}]"
     return address
@@ -16,73 +14,55 @@ def parse_nodes(content):
     try:
         data = json.loads(content)
         outbounds = data.get("outbounds", [])
-        
         for out in outbounds:
-            # 兼容 sing-box (type) 和 xray (protocol)
             protocol = out.get("protocol") or out.get("type")
-            if protocol != "vless": continue 
-
-            # --- 提取基础信息 ---
             tag = out.get("tag", "Node")
-            # 处理 xray 的 vnext 嵌套格式
-            if "settings" in out and "vnext" in out["settings"]:
-                srv = out["settings"]["vnext"][0]
-                addr = srv.get("address")
-                port = srv.get("port")
-                uuid = srv.get("users", [{}])[0].get("id")
-            else:
-                # 处理 sing-box 的平铺格式
-                addr = out.get("server")
-                port = out.get("server_port")
-                uuid = out.get("uuid")
-
-            if not all([addr, port, uuid]): continue
-
-            # --- 提取传输层/安全配置 ---
-            stream = out.get("streamSettings", {}) # xray
-            tls = out.get("tls", {})               # sing-box
             
-            net = stream.get("network") or "tcp"
-            security = stream.get("security") or ("reality" if tls.get("reality", {}).get("enabled") else "none")
-            
-            params = {
-                "type": net,
-                "security": security,
-                "encryption": "none"
-            }
-
-            # Reality 参数提取
-            if security == "reality":
-                # 尝试从 xray 结构拿
-                r_settings = stream.get("realitySettings")
-                if r_settings:
-                    params.update({
-                        "sni": r_settings.get("serverName"),
-                        "fp": r_settings.get("fingerprint"),
-                        "pbk": r_settings.get("publicKey"),
-                        "sid": r_settings.get("shortId")
-                    })
+            # --- 提取 VLESS ---
+            if protocol == "vless":
+                if "settings" in out and "vnext" in out["settings"]:
+                    srv = out["settings"]["vnext"][0]
+                    addr, port = srv.get("address"), srv.get("port")
+                    uuid = srv.get("users", [{}])[0].get("id")
                 else:
-                    # 尝试从 sing-box 结构拿
-                    r_sb = tls.get("reality", {})
-                    params.update({
-                        "sni": tls.get("server_name"),
-                        "fp": tls.get("utls", {}).get("fingerprint"),
-                        "pbk": r_sb.get("public_key"),
-                        "sid": r_sb.get("short_id")
-                    })
+                    addr, port, uuid = out.get("server"), out.get("server_port"), out.get("uuid")
 
-            # 路径提取 (xhttp/ws)
-            path = stream.get("xhttpSettings", {}).get("path") or stream.get("wsSettings", {}).get("path")
-            if path: params["path"] = path
+                if not all([addr, port, uuid]): continue
+                
+                stream = out.get("streamSettings", {})
+                tls = out.get("tls", {})
+                net = stream.get("network") or "tcp"
+                security = stream.get("security") or ("reality" if tls.get("reality", {}).get("enabled") else "none")
+                
+                params = {"type": net, "security": security, "encryption": "none"}
+                
+                # Reality 逻辑
+                r_settings = stream.get("realitySettings") or tls.get("reality", {})
+                if security == "reality":
+                    params["sni"] = (stream.get("realitySettings") or {}).get("serverName") or tls.get("server_name")
+                    params["fp"] = (stream.get("realitySettings") or {}).get("fingerprint") or tls.get("utls", {}).get("fingerprint")
+                    params["pbk"] = r_settings.get("publicKey") or r_settings.get("public_key")
+                    params["sid"] = r_settings.get("shortId") or r_settings.get("short_id")
 
-            # --- 构造最终链接 ---
-            addr = fix_address(addr)
-            query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
-            links.append(f"vless://{uuid}@{addr}:{port}?{query}#{urllib.parse.quote(tag)}")
-            
-    except Exception as e:
-        print(f"解析错误: {e}")
+                # Path 编码处理
+                path = stream.get("xhttpSettings", {}).get("path") or stream.get("wsSettings", {}).get("path")
+                if path: params["path"] = path # urllib.parse.urlencode 会自动处理编码
+
+                link = f"vless://{uuid}@{fix_address(addr)}:{port}?{urllib.parse.urlencode({k:v for k,v in params.items() if v})}#{urllib.parse.quote(tag)}"
+                links.append(link)
+
+            # --- 提取 Shadowsocks (SS) ---
+            elif protocol in ["shadowsocks", "ss"]:
+                addr = out.get("server") or out.get("settings", {}).get("servers", [{}])[0].get("address")
+                port = out.get("server_port") or out.get("settings", {}).get("servers", [{}])[0].get("port")
+                method = out.get("method") or out.get("settings", {}).get("method")
+                password = out.get("password") or out.get("settings", {}).get("servers", [{}])[0].get("password")
+                
+                if all([addr, port, method, password]):
+                    auth = base64.b64encode(f"{method}:{password}".encode()).decode()
+                    links.append(f"ss://{auth}@{fix_address(addr)}:{port}#{urllib.parse.quote(tag)}")
+
+    except: pass
     return links
 
 def main():
@@ -92,20 +72,15 @@ def main():
 
     all_links = []
     for url in urls:
-        print(f"Fetching: {url[:50]}...")
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=15) as res:
-                nodes = parse_nodes(res.read().decode('utf-8'))
-                all_links.extend(nodes)
+                all_links.extend(parse_nodes(res.read().decode('utf-8')))
         except: continue
 
-    # 利用 set 去重，保持顺序用 dict
     unique_links = list(dict.fromkeys(all_links))
-    
     with open('subscribe.txt', 'w', encoding='utf-8') as f:
         f.write("\n".join(unique_links))
-    print(f"Done. Extracted {len(unique_links)} unique nodes.")
 
 if __name__ == "__main__":
     main()
