@@ -1,51 +1,85 @@
 import urllib.request
-import urllib.parse
+import json
+import base64
 import os
-import time
 
-def fetch_sub(url, backend="https://api.v1.mk/sub?"):
-    params = {
-        "target": "v2ray",
-        "url": url,
-        "list": "true"
-    }
-    final_url = backend + urllib.parse.urlencode(params)
+def parse_json_to_v2ray(json_text):
+    """
+    从 sing-box/xray JSON 配置中提取节点并转换为 v2rayN 链接
+    """
+    links = []
     try:
-        # 设置 30 秒超时，防止卡死
-        with urllib.request.urlopen(final_url, timeout=30) as response:
-            return response.read().decode('utf-8')
+        data = json.loads(json_text)
+        outbounds = data.get("outbounds", [])
+        
+        for out in outbounds:
+            proto = out.get("type") or out.get("protocol")
+            # 1. 处理 Shadowsocks
+            if proto == "shadowsocks":
+                # ss://method:password@server:port#remark
+                method = out.get("method")
+                password = out.get("password")
+                server = out.get("server")
+                port = out.get("server_port") or out.get("port")
+                tag = out.get("tag", "SS-Node")
+                if all([method, password, server, port]):
+                    userpass = base64.b64encode(f"{method}:{password}".encode()).decode()
+                    links.append(f"ss://{userpass}@{server}:{port}#{tag}")
+
+            # 2. 处理 VMess
+            elif proto == "vmess":
+                # vmess://base64(json_config)
+                server = out.get("server")
+                port = out.get("server_port") or out.get("port")
+                uuid = out.get("uuid")
+                tag = out.get("tag", "VMess-Node")
+                if all([server, port, uuid]):
+                    v2_json = {
+                        "v": "2", "ps": tag, "add": server, "port": str(port),
+                        "id": uuid, "aid": "0", "net": "tcp", "type": "none"
+                    }
+                    v2_enc = base64.b64encode(json.dumps(v2_json).encode()).decode()
+                    links.append(f"vmess://{v2_enc}")
+            
+            # 3. 处理 VLESS (简单实现)
+            elif proto == "vless":
+                server = out.get("server")
+                port = out.get("server_port") or out.get("port")
+                uuid = out.get("uuid")
+                tag = out.get("tag", "VLESS-Node")
+                if all([server, port, uuid]):
+                    links.append(f"vless://{uuid}@{server}:{port}?type=tcp#{tag}")
+
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return ""
+        print(f"  Parse Error: {e}")
+    return links
 
 def main():
     if not os.path.exists('sources.txt'):
-        print("sources.txt not found")
         return
 
     with open('sources.txt', 'r') as f:
         urls = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
-    all_results = []
-    
-    # 逐个处理，避免请求过长导致 500 错误
-    for index, url in enumerate(urls):
-        print(f"[{index+1}/{len(urls)}] Processing: {url[:50]}...")
-        # 如果 api.v1.mk 持续 500，可以换成下面的备用后端：
-        # https://sub.id9.cc/sub?
-        # https://sub.xeton.dev/sub?
-        result = fetch_sub(url, backend="https://sub.xeton.dev/sub?")
-        if result.strip():
-            all_results.append(result.strip())
-        # 稍微停顿，避免被后端屏蔽
-        time.sleep(1)
+    final_links = []
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-    # 写入结果
-    content = "\n".join(all_results)
+    for url in urls:
+        print(f"Downloading: {url[:60]}...")
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as response:
+                content = response.read().decode('utf-8')
+                nodes = parse_json_to_v2ray(content)
+                print(f"  Found {len(nodes)} nodes")
+                final_links.extend(nodes)
+        except Exception as e:
+            print(f"  Failed: {e}")
+
+    # 保存为纯文本（一行一个链接）
     with open('subscribe.txt', 'w', encoding='utf-8') as f:
-        f.write(content)
-    
-    print(f"Done! Total nodes merged into subscribe.txt")
+        f.write("\n".join(final_links))
+    print(f"\nDone! Total nodes extracted: {len(final_links)}")
 
 if __name__ == "__main__":
     main()
