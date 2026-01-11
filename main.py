@@ -19,14 +19,12 @@ def parse_nodes(content, source_label, start_index):
             protocol = out.get("protocol") or out.get("type")
             if protocol != "vless": continue 
             
-            # --- 提取核心信息 ---
+            # --- 基础字段提取 ---
             if "settings" in out and "vnext" in out["settings"]:
                 srv = out["settings"]["vnext"][0]
                 addr, port = srv.get("address"), srv.get("port")
                 user = srv.get("users", [{}])[0]
-                # 关键：只取 UUID 部分，忽略后面可能的后量子加密干扰字符
-                raw_id = user.get("id", "")
-                uuid = raw_id.split()[0] if " " in raw_id else raw_id[:36]
+                uuid = user.get("id", "").split()[0][:36] # 严格截取 UUID
                 flow = user.get("flow", "")
             else:
                 addr, port, uuid = out.get("server"), out.get("server_port"), out.get("uuid")
@@ -35,7 +33,7 @@ def parse_nodes(content, source_label, start_index):
             if not all([addr, port, uuid]): continue
             node_count += 1
             
-            # --- 提取传输层 ---
+            # --- 传输层提取 ---
             stream = out.get("streamSettings", {})
             tls = out.get("tls", {})
             net = stream.get("network") or "tcp"
@@ -46,39 +44,42 @@ def parse_nodes(content, source_label, start_index):
                 "security": security,
                 "type": net
             }
-            if flow: params["flow"] = flow # 修复 vision 流控
 
-            # 1. Reality 参数 (兼容 xray/singbox)
+            # 1. 关键：流控处理 (xhttp 不兼容 vision)
+            if net == "tcp" and flow:
+                params["flow"] = flow
+
+            # 2. Reality 深度适配
             r_settings = stream.get("realitySettings") or tls.get("reality", {})
             if security == "reality":
-                params["sni"] = (stream.get("realitySettings") or {}).get("server_name") or \
-                                (stream.get("realitySettings") or {}).get("serverName") or \
-                                tls.get("server_name")
-                params["fp"] = (stream.get("realitySettings") or {}).get("fingerprint") or \
-                               tls.get("utls", {}).get("fingerprint") or "chrome"
-                params["pbk"] = r_settings.get("public_key") or r_settings.get("publicKey")
-                params["sid"] = r_settings.get("short_id") or r_settings.get("shortId")
+                params["sni"] = (stream.get("realitySettings") or {}).get("serverName") or tls.get("server_name")
+                params["fp"] = (stream.get("realitySettings") or {}).get("fingerprint") or "chrome"
+                params["pbk"] = r_settings.get("publicKey") or r_settings.get("public_key")
+                params["sid"] = r_settings.get("shortId") or r_settings.get("short_id")
                 if r_settings.get("spiderX"): params["spx"] = r_settings.get("spiderX")
 
-            # 2. xhttp 特定参数
+            # 3. xhttp 协议参数名深度修正 (v2rayN 兼容性)
             if net == "xhttp":
                 xh = stream.get("xhttpSettings", {})
-                if xh.get("path"): params["path"] = xh.get("path")
+                path_val = xh.get("path")
+                if path_val:
+                    params["path"] = path_val
+                    params["extra"] = path_val # v2rayN 某些版本识别 extra 字段
                 if xh.get("mode"): params["mode"] = xh.get("mode")
 
-            # 3. gRPC 特定参数
+            # 4. gRPC 路径补全
             elif net == "grpc":
                 gp = stream.get("grpcSettings", {})
                 if gp.get("serviceName"): params["serviceName"] = gp.get("serviceName")
 
-            # --- 构造节点名与链接 ---
+            # --- 构造链接 ---
             custom_tag = f"{source_label}-{node_count:03d} | {addr}"
-            query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
+            # 使用 safe='/' 避免路径斜杠被过度编码
+            query = urllib.parse.urlencode({k: v for k, v in params.items() if v}, safe='/')
             link = f"vless://{uuid}@{fix_address(addr)}:{port}?{query}#{urllib.parse.quote(custom_tag)}"
             links.append(link)
 
-    except Exception as e:
-        print(f"解析异常: {e}")
+    except Exception: pass
     return links, node_count
 
 def main():
@@ -100,7 +101,6 @@ def main():
     unique_links = list(dict.fromkeys(all_links))
     with open('subscribe.txt', 'w', encoding='utf-8') as f:
         f.write("\n".join(unique_links))
-    print(f"成功导出 {len(unique_links)} 个节点。")
 
 if __name__ == "__main__":
     main()
