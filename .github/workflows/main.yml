@@ -1,0 +1,29 @@
+name: Node Extract Bot
+on:
+  schedule:
+    - cron: '0 */6 * * *' # 每 6 小时自动运行一次
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Run Extractor
+        run: python main.py
+
+      - name: Upload Protocol Raw Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Protocol-Raw-Files
+          path: |
+            vless_raw.txt
+            hy2_raw.txt
+            ss_raw.txt
