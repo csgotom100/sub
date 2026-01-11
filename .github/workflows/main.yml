@@ -1,14 +1,14 @@
 name: Node Extract Bot
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *' # 每6小时运行
+    - cron: '0 */6 * * *'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 必须赋予写入权限
+      contents: write # 关键：允许 Action 修改你的仓库文件
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -17,16 +17,10 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
 
       - name: Install Dependencies
-        run: pip install pyyaml  # <--- 必须添加这一行
+        run: pip install pyyaml
 
-      - name: Run Extractor
-        run: python main.py
       - name: Run Extractor
         run: python main.py
 
@@ -34,6 +28,7 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          git add vless_raw.txt hy2_raw.txt subscribe.txt
-          # 只有在文件有变动时才提交，防止报错
+          # 告诉 Git 追踪这两个新生成的文件
+          git add clash_nodes.yaml clash_to_v2ray.txt
+          # 只有当文件确实有变动时才提交，避免报错
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update nodes $(date)" && git push)
