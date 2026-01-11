@@ -1,6 +1,5 @@
 import urllib.request
 import json
-import base64
 import os
 import urllib.parse
 
@@ -10,7 +9,7 @@ def fix_address(address):
     return address
 
 def parse_nodes(content):
-    nodes_data = []
+    extracted_nodes = []
     try:
         data = json.loads(content)
         outbounds = data.get("outbounds", [])
@@ -18,7 +17,7 @@ def parse_nodes(content):
             protocol = out.get("protocol") or out.get("type")
             if protocol != "vless": continue 
             
-            # 严格提取
+            # --- 基础字段提取 ---
             if "settings" in out and "vnext" in out["settings"]:
                 srv = out["settings"]["vnext"][0]
                 addr, port = srv.get("address"), srv.get("port")
@@ -30,46 +29,64 @@ def parse_nodes(content):
 
             if not all([addr, port, uuid]): continue
 
-            # 构造参数字典 (严格按照 JSON 原文)
+            # --- 传输层与安全字段提取 ---
             stream = out.get("streamSettings", {})
             tls = out.get("tls", {})
             net = stream.get("network") or out.get("transport", {}).get("type") or "tcp"
             security = stream.get("security") or ("reality" if tls.get("reality", {}).get("enabled") else "none")
             
+            # 基础参数
             params = {"encryption": "none", "security": security, "type": net}
             if flow: params["flow"] = flow
 
-            r_settings = stream.get("realitySettings") or tls.get("reality", {})
+            # --- Reality 参数穷举抓取 (重点修复) ---
+            # 整合所有可能的 Reality 配置源
+            r_src = {}
+            r_src.update(stream.get("realitySettings", {}))
+            r_src.update(tls.get("reality", {}))
+            
             if security == "reality":
-                for k, v in [("sni", "serverName"), ("fp", "fingerprint"), ("pbk", "publicKey"), ("sid", "shortId"), ("spx", "spiderX")]:
-                    val = stream.get("realitySettings", {}).get(v) or tls.get(v if v != "serverName" else "server_name") or r_settings.get(v)
-                    if val: params[k] = val
+                # SNI 查找
+                params["sni"] = r_src.get("serverName") or r_src.get("server_name") or tls.get("server_name")
+                # Fingerprint 查找
+                params["fp"] = r_src.get("fingerprint") or tls.get("utls", {}).get("fingerprint")
+                # PublicKey 查找
+                params["pbk"] = r_src.get("publicKey") or r_src.get("public_key")
+                # ShortId 查找
+                params["sid"] = r_src.get("shortId") or r_src.get("short_id")
+                # SpiderX 查找
+                spx = r_src.get("spiderX")
+                if spx: params["spx"] = spx
 
+            # --- 传输协议路径提取 ---
             if net == "xhttp":
                 xh = stream.get("xhttpSettings", {})
                 if xh.get("path"): params["path"] = xh.get("path")
                 if xh.get("mode"): params["mode"] = xh.get("mode")
             elif net == "grpc":
-                if stream.get("grpcSettings", {}).get("serviceName"): params["serviceName"] = stream["grpcSettings"]["serviceName"]
+                gp = stream.get("grpcSettings", {})
+                if gp.get("serviceName"): params["serviceName"] = gp.get("serviceName")
             elif net == "ws":
-                if stream.get("wsSettings", {}).get("path"): params["path"] = stream["wsSettings"]["path"]
+                ws = stream.get("wsSettings", {})
+                if ws.get("path"): params["path"] = ws.get("path")
 
-            # 将节点的核心特征和完整参数存入列表
-            nodes_data.append({
-                "key": f"{addr}:{port}:{uuid}", # 物理唯一特征
-                "addr": addr, "port": port, "uuid": uuid, "params": params
+            # 存储物理特征用于去重
+            extracted_nodes.append({
+                "unique_key": (addr, port, uuid), 
+                "addr": addr, "port": port, "uuid": uuid, 
+                "params": {k: v for k, v in params.items() if v}
             })
     except: pass
-    return nodes_data
+    return extracted_nodes
 
 def main():
     if not os.path.exists('sources.txt'): return
     with open('sources.txt', 'r', encoding='utf-8') as f:
         urls = [line.strip() for line in f if line.startswith('http')]
 
-    seen_keys = set()
+    seen_nodes = set()
     final_links = []
-    global_idx = 1
+    idx = 1
 
     for url in urls:
         try:
@@ -77,14 +94,13 @@ def main():
             with urllib.request.urlopen(req, timeout=10) as res:
                 nodes = parse_nodes(res.read().decode('utf-8'))
                 for n in nodes:
-                    if n["key"] not in seen_keys: # 物理去重判断
-                        seen_keys.add(n["key"])
+                    if n["unique_key"] not in seen_nodes:
+                        seen_nodes.add(n["unique_key"])
                         query = urllib.parse.urlencode(n["params"])
-                        # 节点名称只保留数字索引，追求极致简洁
-                        tag = f"NODE-{global_idx:03d}" 
+                        tag = urllib.parse.quote(f"Node-{idx:03d}")
                         link = f"vless://{n['uuid']}@{fix_address(n['addr'])}:{n['port']}?{query}#{tag}"
                         final_links.append(link)
-                        global_idx += 1
+                        idx += 1
         except: continue
 
     with open('subscribe.txt', 'w', encoding='utf-8') as f:
