@@ -2,7 +2,7 @@ import urllib.request
 import os
 import urllib.parse
 import base64
-import yaml  # 确保 GitHub Actions 环境已 pip install pyyaml
+import yaml  # 确保 Workflow 中有 pip install pyyaml
 
 def fix_address(address):
     if ":" in address and not address.startswith("["):
@@ -44,44 +44,49 @@ class ClashConverter:
     def to_ss(p):
         addr, port, method, password = p.get('server'), p.get('port'), p.get('cipher'), p.get('password')
         if not all([addr, port, method, password]): return None
-        # Shadowsocks 标准格式: ss://base64(method:password)@addr:port
-        auth_str = f"{method}:{password}"
-        auth_b64 = base64.b64encode(auth_str.encode()).decode().strip("=")
+        auth_b64 = base64.b64encode(f"{method}:{password}".encode()).decode().strip("=")
         return f"ss://{auth_b64}@{fix_address(addr)}:{port}"
 
     @staticmethod
     def to_trojan(p):
         addr, port, password = p.get('server'), p.get('port'), p.get('password')
         if not all([addr, port, password]): return None
-        params = {
-            "sni": p.get('sni') or p.get('servername'),
-            "allowInsecure": 1 if p.get('skip-cert-verify') else 0
-        }
+        params = {"sni": p.get('sni') or p.get('servername'), "allowInsecure": 1 if p.get('skip-cert-verify') else 0}
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
         return f"trojan://{password}@{fix_address(addr)}:{port}?{query}"
 
 def main():
-    if not os.path.exists('sources.txt'): return
-    with open('sources.txt', 'r', encoding='utf-8') as f:
-        urls = [line.strip() for line in f if 'clash' in line.lower() and line.startswith('http')]
-
+    # --- 变量初始化 (防止 NameError) ---
     all_proxies = []
     v2ray_links = []
     seen = set()
+    
+    if not os.path.exists('sources.txt'):
+        print("Error: sources.txt not found.")
+        return
+
+    with open('sources.txt', 'r', encoding='utf-8') as f:
+        urls = [line.strip() for line in f if 'clash' in line.lower() and line.startswith('http')]
 
     for url in urls:
         try:
+            print(f"Fetching: {url}")
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=15) as res:
-                data = yaml.safe_load(res.read().decode('utf-8'))
+                content = res.read().decode('utf-8')
+                data = yaml.safe_load(content)
+                if not data or 'proxies' not in data:
+                    continue
+                
                 proxies = data.get('proxies', [])
                 for p in proxies:
                     ptype = str(p.get('type', '')).lower()
+                    # 物理去重：协议+地址+端口
                     identity = f"{ptype}:{p.get('server')}:{p.get('port')}"
                     if identity in seen: continue
                     seen.add(identity)
                     
-                    # 1. 物理搬运
+                    # 1. 照搬节点
                     all_proxies.append(p)
                     
                     # 2. 转换链接
@@ -93,36 +98,19 @@ def main():
                     
                     if link: v2ray_links.append(link)
         except Exception as e:
-            print(f"Error: {url} -> {e}")
+            print(f"Error skipping {url}: {e}")
 
-    # 结果一：照搬节点 YAML
+    # --- 写入文件 (物理隔离输出) ---
+    # 结果一：纯节点 YAML
     with open('clash_nodes.yaml', 'w', encoding='utf-8') as f:
         yaml.dump({"proxies": all_proxies}, f, allow_unicode=True, sort_keys=False)
 
-    # 结果二：转换后的链接 TXT
+    # 结果二：转换后的 TXT
     with open('clash_to_v2ray.txt', 'w', encoding='utf-8') as f:
         for i, link in enumerate(v2ray_links, 1):
             f.write(f"{link}#Clash-{i:03d}\n")
 
-    print(f"成功从 Clash 源提取并转换了 {len(v2ray_links)} 个节点。")
+    print(f"成功处理！共提取 {len(all_proxies)} 个节点，生成 {len(v2ray_links)} 个链接。")
 
 if __name__ == "__main__":
     main()
-#  main.py 结尾
-    output_path1 = 'clash_nodes.yaml'
-    output_path2 = 'clash_to_v2ray.txt'
-
-    # 输出一：照搬节点 YAML
-    with open(output_path1, 'w', encoding='utf-8') as f:
-        yaml.dump({"proxies": all_proxies}, f, allow_unicode=True, sort_keys=False)
-
-    # 输出二：转换后的链接 TXT
-    with open(output_path2, 'w', encoding='utf-8') as f:
-        for i, link in enumerate(v2ray_links, 1):
-            f.write(f"{link}#Clash-{i:03d}\n")
-
-    # 调试日志：在 Actions Console 里确认文件大小
-    if os.path.exists(output_path1):
-        print(f"文件已生成: {output_path1}, 大小: {os.path.getsize(output_path1)} bytes")
-    if os.path.exists(output_path2):
-        print(f"文件已生成: {output_path2}, 大小: {os.path.getsize(output_path2)} bytes")
